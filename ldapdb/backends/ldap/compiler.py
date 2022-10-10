@@ -186,7 +186,7 @@ class SQLCompiler(compiler.SQLCompiler):
                 scope=lookup.scope,
                 order_by=ordering,
                 offset=self.query.low_mark,
-                limit=self.query.high_mark,
+                limit=self.query.high_mark - self.query.low_mark if self.query.high_mark else None,
                 filterstr=lookup.filterstr,
                 attrlist=attrlist,
             )

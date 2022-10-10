@@ -388,7 +388,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
             sssctrl = SSSRequestControl(ordering_rules=ordering_rules)
             vlvctrol = VLVRequestControl(
-                after_count=limit - 1 if limit else self.page_size,
+                after_count=limit - 1 if limit else 100000000,
                 before_count=0,  # TODO: try out greater_than_or_equal
                 content_count=0,
                 criticality=False,
