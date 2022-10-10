@@ -172,16 +172,6 @@ class SQLCompiler(compiler.SQLCompiler):
 
         attrlist = [x.db_column for x in fields if x.db_column]
 
-        try:
-            vals = self.connection.search_s(
-                base=lookup.base,
-                scope=lookup.scope,
-                filterstr=lookup.filterstr,
-                attrlist=attrlist,
-            )
-        except ldap.NO_SUCH_OBJECT:
-            return
-
         # perform sorting
         if self.query.extra_order_by:
             ordering = self.query.extra_order_by
@@ -190,43 +180,22 @@ class SQLCompiler(compiler.SQLCompiler):
         else:
             ordering = self.query.order_by or self.query.model._meta.ordering
 
-        for fieldname in reversed(ordering):
-            if fieldname.startswith('-'):
-                sort_field = fieldname[1:]
-                reverse = True
-            else:
-                sort_field = fieldname
-                reverse = False
-
-            if sort_field == 'pk':
-                sort_field = self.query.model._meta.pk.name
-            field = self.query.model._meta.get_field(sort_field)
-
-            if sort_field == 'dn':
-                vals = sorted(vals, key=lambda pair: pair[0], reverse=reverse)
-            else:
-                def get_key(obj):
-                    attr = field.from_ldap(
-                        obj[1].get(field.db_column, []),
-                        connection=self.connection,
-                    )
-                    if hasattr(attr, 'lower'):
-                        attr = attr.lower()
-                    return attr
-                vals = sorted(vals, key=get_key, reverse=reverse)
+        try:
+            vals = self.connection.search_s_via_vlv(
+                base=lookup.base,
+                scope=lookup.scope,
+                order_by=ordering,
+                offset=self.query.low_mark,
+                limit=self.query.high_mark,
+                filterstr=lookup.filterstr,
+                attrlist=attrlist,
+            )
+        except ldap.NO_SUCH_OBJECT:
+            return
 
         # process results
-        pos = 0
         results = []
         for dn, attrs in vals:
-            # FIXME : This is not optimal, we retrieve more results than we
-            # need but there is probably no other options as we can't perform
-            # ordering server side.
-            if (self.query.low_mark and pos < self.query.low_mark) or \
-               (self.query.high_mark is not None
-                    and pos >= self.query.high_mark):
-                pos += 1
-                continue
             row = []
             self.setup_query()
             for e in self.select:
@@ -259,7 +228,6 @@ class SQLCompiler(compiler.SQLCompiler):
                 else:
                     results.append(row)
             yield row
-            pos += 1
 
     def has_results(self):
         import inspect

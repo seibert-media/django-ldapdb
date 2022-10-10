@@ -4,7 +4,6 @@
 
 import django
 import ldap
-import ldap.controls
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.client import BaseDatabaseClient
 from django.db.backends.base.creation import BaseDatabaseCreation
@@ -13,6 +12,9 @@ from django.db.backends.base.introspection import BaseDatabaseIntrospection
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.backends.base.validation import BaseDatabaseValidation
+from ldap.controls import SimplePagedResultsControl
+from ldap.controls.sss import SSSRequestControl
+from ldap.controls.vlv import VLVRequestControl
 
 
 class DatabaseCreation(BaseDatabaseCreation):
@@ -335,7 +337,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
             query_timeout = cursor.connection.timeout
 
             # Request pagination; don't fail if the server doesn't support it.
-            ldap_control = ldap.controls.SimplePagedResultsControl(
+            ldap_control = SimplePagedResultsControl(
                 criticality=False,
                 size=self.page_size,
                 cookie='',
@@ -372,3 +374,32 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                 else:
                     # End of pages
                     break
+
+    def search_s_via_vlv(self, base, scope,
+                         filterstr='(objectClass=*)', attrlist=None, order_by=None, limit=None, offset=0):
+        with self.cursor() as cursor:
+            query_timeout = cursor.connection.timeout
+
+            if not order_by:
+                order_by = ['entryDN']
+
+            # TODO: Support other matching types
+            ordering_rules = [f'{attr}:caseIgnoreOrderingMatch' for attr in order_by]
+
+            sssctrl = SSSRequestControl(ordering_rules=ordering_rules)
+            vlvctrol = VLVRequestControl(
+                after_count=limit - 1 if limit else self.page_size,
+                before_count=0,  # TODO: try out greater_than_or_equal
+                content_count=0,
+                criticality=False,
+                offset=offset + 1,  # offset specifies the index of the first result
+            )
+
+            return cursor.connection.search_ext_s(
+                base=base,
+                scope=scope,
+                filterstr=filterstr,
+                attrlist=attrlist,
+                serverctrls=[sssctrl, vlvctrol],
+                timeout=query_timeout,
+            )
