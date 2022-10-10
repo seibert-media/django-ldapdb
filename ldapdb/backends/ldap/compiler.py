@@ -122,11 +122,13 @@ class SQLCompiler(compiler.SQLCompiler):
             return
 
         try:
-            vals = self.connection.search_s(
+            vals = self.connection.search_s_via_vlv(
                 base=lookup.base,
                 scope=lookup.scope,
                 filterstr=lookup.filterstr,
                 attrlist=['dn'],
+                offset=self.query.low_mark,
+                limit=self.query.high_mark - self.query.low_mark if self.query.high_mark else None,
             )
             # Flatten iterator
             vals = list(vals)
