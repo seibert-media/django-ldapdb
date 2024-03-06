@@ -94,6 +94,7 @@ class Model(django.db.models.base.Model):
             field.db_column: (
                 None if old is None else get_field_value(field, old),
                 get_field_value(field, self),
+                getattr(field, 'update_strategy', None),
             )
             for field in target_fields
         }
@@ -123,14 +124,29 @@ class Model(django.db.models.base.Model):
         else:
             modlist = []
             for colname, change in sorted(changes.items()):
-                old_value, new_value = change
+                old_value, new_value, update_strategy = change
                 if old_value == new_value:
                     continue
-                modlist.append((
-                    ldap.MOD_DELETE if new_value == [] else ldap.MOD_REPLACE,
-                    colname,
-                    new_value,
-                ))
+
+                if update_strategy == 'ADD_DELETE':
+                    old_value_set = set(old_value)
+                    new_value_set = set(new_value)
+                    added = new_value_set.difference(old_value_set)
+                    removed = old_value_set.difference(new_value_set)
+                    for value in added:
+                        modlist.append((
+                            ldap.MOD_ADD, colname, value
+                        ))
+                    for value in removed:
+                        modlist.append((
+                            ldap.MOD_DELETE, colname, value
+                        ))
+                else:
+                    modlist.append((
+                        ldap.MOD_DELETE if new_value == [] else ldap.MOD_REPLACE,
+                        colname,
+                        new_value,
+                    ))
 
             if new_dn != old_dn:
                 logger.debug("renaming ldap entry %s to %s", old_dn, new_dn)
