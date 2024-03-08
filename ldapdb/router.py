@@ -30,25 +30,23 @@ class Router(object):
                 self.ldap_alias = alias
                 break
 
-    def allow_migrate(self, db, app_label, model_name=None, **hints):
+    def allow_migrate(self, db, *_args, model=None, **_hints):
         # disallow any migration operation on ldap engine
         if db == self.ldap_alias:
             return False
 
         # avoid any migration operation on ldap models
-        if model_name:
-            model = apps.get_model(app_label, model_name)
-            if issubclass(model, Model):
-                return False
+        if is_ldap_model(model):
+            return False
         return None
 
-    def db_for_read(self, model, **hints):
+    def db_for_read(self, model, **_hints):
         "Point all operations on LDAP models to the LDAP database"
         if is_ldap_model(model):
             return self.ldap_alias
         return None
 
-    def db_for_write(self, model, **hints):
+    def db_for_write(self, model, **_hints):
         "Point all operations on LDAP models to the LDAP database"
         if is_ldap_model(model):
             return self.ldap_alias
