@@ -375,18 +375,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                     # End of pages
                     break
 
-    def search_s_via_vlv(self, base, scope,
-                         filterstr='(objectClass=*)', attrlist=None, order_by=None, limit=None, offset=0):
+    def search_s_via_vlv(self, base, scope, order_by, filterstr='(objectClass=*)', attrlist=None, limit=None, offset=0):
         with self.cursor() as cursor:
             query_timeout = cursor.connection.timeout
 
-            if not order_by:
-                order_by = ['entryDN']
+            sssctrl = SSSRequestControl(
+                ordering_rules=[f'{attr}:{order_rule}' for attr, order_rule in order_by]
+            )
 
-            # TODO: Support other matching types
-            ordering_rules = [f'{attr}:caseIgnoreOrderingMatch' for attr in order_by]
-
-            sssctrl = SSSRequestControl(ordering_rules=ordering_rules)
             vlvctrol = VLVRequestControl(
                 after_count=limit - 1 if limit else 100000000,
                 before_count=0,  # TODO: try out greater_than_or_equal

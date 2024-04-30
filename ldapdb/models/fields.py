@@ -107,6 +107,11 @@ class ListContainsLookup(ExactLookup):
 class LdapFieldMixin(object):
     multi_valued_field = False
     binary_field = False
+    ordering_rule = None
+
+    def __init__(self, *args, ordering_rule=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ordering_rule = ordering_rule
 
     def get_db_prep_value(self, value, connection, prepared=False):
         """Prepare a value for DB interaction.

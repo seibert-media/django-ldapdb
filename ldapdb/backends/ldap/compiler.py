@@ -101,12 +101,27 @@ def where_node_as_ldap(where, compiler, connection):
 
 class SQLCompiler(compiler.SQLCompiler):
     """LDAP-based SQL compiler."""
+    DEFAULT_ORDERING_RULE = 'caseIgnoreOrderingMatch'  # rfc3417 / 2.5.13.3
 
     def compile(self, node, *args, **kwargs):
         """Parse a WhereNode to a LDAP filter string."""
         if isinstance(node, WhereNode):
             return where_node_as_ldap(node, self, self.connection)
         return super().compile(node, *args, **kwargs)
+
+    def _get_ordering_rules(self):
+        ordering_rules = []
+        for order_expr, order_data in self.get_order_by():
+            order_str = order_expr.field.db_column
+            ordering_rule = getattr(order_expr.field, 'ordering_rule')
+            if order_expr.descending:
+                order_str = '-' + order_str
+            ordering_rules.append((order_str, ordering_rule if ordering_rule else self.DEFAULT_ORDERING_RULE))
+        if not ordering_rules:
+            pk_field = self.query.model._meta.pk
+            ordering_rule = getattr(pk_field, 'ordering_rule')
+            ordering_rules.append((pk_field.db_column, ordering_rule if ordering_rule else self.DEFAULT_ORDERING_RULE))
+        return ordering_rules
 
     def execute_sql(self, result_type=compiler.SINGLE, chunked_fetch=False,
                     chunk_size=GET_ITERATOR_CHUNK_SIZE):
@@ -126,6 +141,7 @@ class SQLCompiler(compiler.SQLCompiler):
                 base=lookup.base,
                 scope=lookup.scope,
                 filterstr=lookup.filterstr,
+                order_by=self._get_ordering_rules(),
                 attrlist=['dn'],
                 offset=self.query.low_mark,
                 limit=self.query.high_mark - self.query.low_mark if self.query.high_mark else None,
@@ -174,19 +190,11 @@ class SQLCompiler(compiler.SQLCompiler):
 
         attrlist = [x.db_column for x in fields if x.db_column]
 
-        # perform sorting
-        if self.query.extra_order_by:
-            ordering = self.query.extra_order_by
-        elif not self.query.default_ordering:
-            ordering = self.query.order_by
-        else:
-            ordering = self.query.order_by or self.query.model._meta.ordering
-
         try:
             vals = self.connection.search_s_via_vlv(
                 base=lookup.base,
                 scope=lookup.scope,
-                order_by=ordering,
+                order_by=self._get_ordering_rules(),
                 offset=self.query.low_mark,
                 limit=self.query.high_mark - self.query.low_mark if self.query.high_mark else None,
                 filterstr=lookup.filterstr,
