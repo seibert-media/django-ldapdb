@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # This software is distributed under the two-clause BSD license.
 # Copyright (c) The django-ldapdb project
+from functools import cached_property
 
 import django
 import ldap
@@ -56,8 +57,41 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     uses_savepoints = False
     supports_partial_indexes = False
 
+    supports_ldap_pagination = False
+
     def __init__(self, connection):
-        self.connection = connection
+        super().__init__(connection)
+        self.supports_ldap_pagination = VLVRequestControl.controlType in self.supported_controls
+
+    @cached_property
+    def root_dsa(self):
+        attrlist = [
+            'supportedControl',
+            'supportedExtension',
+            'supportedSASLMechanisms',
+            'supportedLDAPVersion',
+        ]
+        results = self.connection.search_s(
+            '', scope=ldap.SCOPE_BASE, filterstr='(objectClass=*)', attrlist=attrlist
+        )
+        print("ROOT_DSA CALLED")
+        return list(results)[0][1]
+
+    @cached_property
+    def supported_controls(self):
+        return [ctrl.decode() for ctrl in self.root_dsa.get('supportedControl', [])]
+
+    @cached_property
+    def supported_extensions(self):
+        return [ext.decode() for ext in self.root_dsa.get('supportedExtension', [])]
+
+    @cached_property
+    def supported_ldap_version(self):
+        return self.root_dsa['supportedLDAPVersion'][0].decode()
+
+    @cached_property
+    def supported_sasl_mechanisms(self):
+        return [mech.decode() for mech in self.root_dsa.get('supportedSASLMechanisms', [])]
 
 
 class DatabaseIntrospection(BaseDatabaseIntrospection):
@@ -332,7 +366,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         with self.cursor() as cursor:
             return cursor.connection.rename_s(dn, newrdn)
 
-    def search_s(self, base, scope, filterstr='(objectClass=*)', attrlist=None):
+    def search_s_via_page_ctrl(self, base, scope, filterstr='(objectClass=*)', attrlist=None, **_kwargs):
         with self.cursor() as cursor:
             query_timeout = cursor.connection.timeout
 
@@ -367,6 +401,9 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                     if dn is not None:
                         yield dn, attrs
 
+                if not page_controls:
+                    break
+
                 page_control = page_controls[0]
                 page += 1
                 if page_control.cookie:
@@ -375,7 +412,9 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                     # End of pages
                     break
 
-    def search_s_via_vlv(self, base, scope, order_by, filterstr='(objectClass=*)', attrlist=None, limit=None, offset=0):
+    def search_s_via_vlv(
+        self, base, scope, order_by, filterstr='(objectClass=*)', attrlist=None, limit=None, offset=0, **_kwargs
+    ):
         with self.cursor() as cursor:
             query_timeout = cursor.connection.timeout
 
@@ -385,7 +424,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
             vlvctrol = VLVRequestControl(
                 after_count=limit - 1 if limit else 100000000,
-                before_count=0,  # TODO: try out greater_than_or_equal
+                before_count=0,
                 content_count=0,
                 criticality=False,
                 offset=offset + 1,  # offset specifies the index of the first result
@@ -399,3 +438,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                 serverctrls=[sssctrl, vlvctrol],
                 timeout=query_timeout,
             )
+
+    def search_s(self, *args, **kwargs):
+        if not hasattr(self, 'features') or not self.features.supports_ldap_pagination:
+            return self.search_s_via_page_ctrl(*args, **kwargs)
+        return self.search_s_via_vlv(*args, **kwargs)

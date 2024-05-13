@@ -3,12 +3,13 @@
 # Copyright (c) The django-ldapdb project
 
 import collections
+import logging
 import re
 
 import ldap
 from django.db.models import aggregates
 from django.db.models.sql import compiler
-from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE
+from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE, MULTI
 from django.db.models.sql.where import AND, OR, WhereNode
 
 from ldapdb import escape_ldap_filter
@@ -17,6 +18,8 @@ from ldapdb.models.fields import ListField
 _ORDER_BY_LIMIT_OFFSET_RE = re.compile(
     r"(?:\bORDER BY\b\s+([\w\.]+)\s(?P<order>\bASC\b)|(\bDESC\b))\s{1,2}(?:\bLIMIT\b\s+(?P<limit>-?\d+))?[\)\s]?(?:\bOFFSET\b\s+(?P<offset>(\d+)))?"  # noqa: E501
 )
+
+logger = logging.getLogger('ldapdb.backend')
 
 
 class LdapDBError(Exception):
@@ -28,6 +31,9 @@ LdapLookup = collections.namedtuple('LdapLookup', ['base', 'scope', 'filterstr']
 
 def query_as_ldap(query, compiler, connection):
     """Convert a django.db.models.sql.query.Query to a LdapLookup."""
+
+    # logger.debug(query)
+
     if query.is_empty():
         return
 
@@ -57,6 +63,14 @@ def query_as_ldap(query, compiler, connection):
     sql, params = compiler.compile(query.where)
     if sql:
         filterstr += '(%s)' % (sql % tuple(escape_ldap_filter(param) for param in params))
+
+    logger.debug(
+        'LdapLookup(base={base}, scope={scope}, filterstr={filterstr}'.format(
+            base=query.model.base_dn,
+            scope=query.model.search_scope,
+            filterstr='(&%s)' % filterstr,
+        )
+    )
     return LdapLookup(
         base=query.model.base_dn,
         scope=query.model.search_scope,
@@ -103,11 +117,19 @@ class SQLCompiler(compiler.SQLCompiler):
     """LDAP-based SQL compiler."""
     DEFAULT_ORDERING_RULE = 'caseIgnoreOrderingMatch'  # rfc3417 / 2.5.13.3
 
-    def compile(self, node, *args, **kwargs):
+    def compile(self, node):
         """Parse a WhereNode to a LDAP filter string."""
         if isinstance(node, WhereNode):
             return where_node_as_ldap(node, self, self.connection)
-        return super().compile(node, *args, **kwargs)
+        return super().compile(node)
+
+    def _get_cols(self):
+        if len(self.query.select):
+            fields = [x.field for x in self.query.select]
+        else:
+            fields = self.query.model._meta.fields
+
+        return [x.db_column for x in fields if x.db_column]
 
     def _get_ordering_rules(self):
         ordering_rules = []
@@ -123,10 +145,13 @@ class SQLCompiler(compiler.SQLCompiler):
             ordering_rules.append((pk_field.db_column, ordering_rule if ordering_rule else self.DEFAULT_ORDERING_RULE))
         return ordering_rules
 
-    def execute_sql(self, result_type=compiler.SINGLE, chunked_fetch=False,
-                    chunk_size=GET_ITERATOR_CHUNK_SIZE):
-        if result_type != compiler.SINGLE:
-            raise Exception("LDAP does not support MULTI queries")
+    def execute_sql(self, result_type=MULTI, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE):
+        print("EXECUTE_SQL")
+
+        if chunked_fetch:
+            logger.debug(
+                f'Received chunked_fetch with chunk_size {chunk_size}, but django-ldapdb does not support chunks'
+            )
 
         # Setup self.select, self.klass_info, self.annotation_col_map
         # All expected from ModelIterable.__iter__
@@ -137,12 +162,12 @@ class SQLCompiler(compiler.SQLCompiler):
             return
 
         try:
-            vals = self.connection.search_s_via_vlv(
+            vals = self.connection.search_s(
                 base=lookup.base,
                 scope=lookup.scope,
                 filterstr=lookup.filterstr,
                 order_by=self._get_ordering_rules(),
-                attrlist=['dn'],
+                attrlist=self._get_cols(),
                 offset=self.query.low_mark,
                 limit=self.query.high_mark - self.query.low_mark if self.query.high_mark else None,
             )
@@ -151,9 +176,10 @@ class SQLCompiler(compiler.SQLCompiler):
         except ldap.NO_SUCH_OBJECT:
             vals = []
 
-        if not vals:
-            return None
+        return vals if vals else None
 
+        # TODO: What is with this stuff? Migrate to SQLAggregateCompiler or self.get_group_by()?
+        #  also: .count() is currently broken
         output = []
         self.setup_query()
         for e in self.select:
@@ -179,29 +205,17 @@ class SQLCompiler(compiler.SQLCompiler):
         return output
 
     def results_iter(self, results=None, tuple_expected=False, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE):
+        print(f"RESULTS_ITER: tuple_expected={tuple_expected}")
         lookup = query_as_ldap(self.query, compiler=self, connection=self.connection)
         if lookup is None:
             return
 
-        if len(self.query.select):
-            fields = [x.field for x in self.query.select]
-        else:
-            fields = self.query.model._meta.fields
-
-        attrlist = [x.db_column for x in fields if x.db_column]
-
-        try:
-            vals = self.connection.search_s_via_vlv(
-                base=lookup.base,
-                scope=lookup.scope,
-                order_by=self._get_ordering_rules(),
-                offset=self.query.low_mark,
-                limit=self.query.high_mark - self.query.low_mark if self.query.high_mark else None,
-                filterstr=lookup.filterstr,
-                attrlist=attrlist,
+        if results is None:
+            vals = self.execute_sql(
+                MULTI, chunked_fetch=chunked_fetch, chunk_size=chunk_size
             )
-        except ldap.NO_SUCH_OBJECT:
-            return
+        else:
+            vals = results
 
         # process results
         results = []
@@ -257,7 +271,7 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
 
 
 class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
-    def execute_sql(self, result_type=compiler.MULTI):
+    def execute_sql(self, result_type=compiler.MULTI, **kwargs):
         lookup = query_as_ldap(self.query, compiler=self, connection=self.connection)
         if not lookup:
             return
@@ -282,7 +296,7 @@ class SQLUpdateCompiler(compiler.SQLUpdateCompiler, SQLCompiler):
 
 
 class SQLAggregateCompiler(compiler.SQLAggregateCompiler, SQLCompiler):
-    def execute_sql(self, result_type=compiler.SINGLE):
+    def execute_sql(self, result_type=compiler.SINGLE, **kwargs):
         # Return only number values through the aggregate compiler
         output = super().execute_sql(result_type)
         return filter(lambda a: isinstance(a, int), output)
